@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Three.js + MediaPipe 手势粒子系统 (V2 - 修复版)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        
+        /* --- [修改] 摄像头样式 --- */
+        #video-element { 
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 240px; /* 小窗宽度 */
+            height: auto;
+            border-radius: 12px;
+            border: 2px solid rgba(0, 255, 204, 0.5); /* 加个科技感边框 */
+            z-index: 10; /* 保证在最上层 */
+            transform: scaleX(-1); /* 镜像显示，符合自拍习惯 */
+        }
+
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: white; font-family: Arial; font-size: 24px; pointer-events: none;
+        }
+        .instruction {
+            position: absolute; bottom: 20px; left: 20px; color: #00ffcc;
+            font-family: monospace; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 8px; pointer-events: none; user-select: none;
+        }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="loading">正在初始化摄像头和 AI 模型...</div>
+    <div id="canvas-container"></div>
+    <video id="video-element"></video>
+    
+    <div class="instruction" id="instruction">
+        <!-- <p>🖐️ <b>张开手掌</b>：粒子扩散 / <b>握拳/捏合</b>：粒子聚拢</p> -->
+        <p>☝️ <b>食指 (1)</b>: Hello World (蓝)</p>
+        <p>✌️ <b>剪刀手 (2)</b>: 2026 (金)</p>
+        <p>👌 <b>三指 (3)</b>: 新年快乐 (红)</p>
+        <p>👍 <b>四指 (4)</b>: 马到成功 (绿)</p>
+        <!-- <p style="margin-top: 10px; color: #ffcc00;">💡 <b>双击空格键</b>可编辑文字</p> -->
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // --- 全局变量 ---
+        // [修改 1/3] 在这里添加 controls，使其成为全局变量
+        let scene, camera, renderer, particles, geometry, controls;
+        const particleCount = 25000; // 稍微增加一点粒子数
+        const particleSize = 0.8;
+        
+        // 粒子状态数据 - 位置
+        let currentPositions = []; 
+        let targetPositions = [];  
+        let randomPositions = [];  
+
+        // --- [新增] 粒子状态数据 - 颜色 ---
+        let currentColors = [];
+        let targetColors = [];
+        const baseColor = new THREE.Color(); // 临时变量避免GC
+        
+        // 交互状态
+        let currentText = "Hello World";
+        let dispersionFactor = 0; 
+        let handDetected = false;
+        
+        // --- [新增] 文字配置对象 ---
+        let textConfig = {
+            1: "Hello World",
+            2: "2026",
+            3: "新年快乐",
+            4: "马到成功"
+        };
+        
+        // --- [新增] 双击空格键检测 ---
+        let lastSpaceTime = 0;
+        const doubleClickDelay = 300; // 300毫秒内视为双击
+
+        // 初始化 Three.js 场景
+        function initThree() {
+            const container = document.getElementById('canvas-container');
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.002);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+            camera.position.z = 120;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            // [修改 2/3] 去掉 const，直接赋值给全局变量 controls
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.autoRotate = true; // 开启自动缓慢旋转，增加动感
+            controls.autoRotateSpeed = 0.5;
+
+            geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(particleCount * 3);
+            const colors = new Float32Array(particleCount * 3);
+
+            for (let i = 0; i < particleCount; i++) {
+                positions[i * 3] = (Math.random() - 0.5) * 500;
+                positions[i * 3 + 1] = (Math.random() - 0.5) * 500;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * 500;
+
+                currentPositions.push({
+                    x: positions[i * 3], y: positions[i * 3 + 1], z: positions[i * 3 + 2]
+                });
+                randomPositions.push({
+                    x: positions[i * 3], y: positions[i * 3 + 1], z: positions[i * 3 + 2]
+                });
+
+                // --- [修改] 初始化颜色 ---
+                // 初始状态设为深蓝色背景
+                const hue = 0.6 + Math.random() * 0.1; // 蓝色范围
+                baseColor.setHSL(hue, 0.5, 0.3); 
+                
+                colors[i * 3] = baseColor.r;
+                colors[i * 3 + 1] = baseColor.g;
+                colors[i * 3 + 2] = baseColor.b;
+                
+                // 初始化当前颜色和目标颜色存储
+                currentColors.push({ r: baseColor.r, g: baseColor.g, b: baseColor.b });
+                targetColors.push({ r: baseColor.r, g: baseColor.g, b: baseColor.b });
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            const material = new THREE.PointsMaterial({
+                size: particleSize,
+                vertexColors: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                transparent: true,
+                opacity: 0.9
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+
+            updateTextTarget("Hello World");
+            
+            window.addEventListener('resize', onWindowResize);
+            
+            // --- [新增] 监听键盘事件 ---
+            window.addEventListener('keydown', onKeyDown);
+            
+            // 初始化说明文字
+            updateInstructionText();
+        }
+        
+        // --- [新增] 更新左下角说明文字 ---
+        function updateInstructionText() {
+            const instructionDiv = document.getElementById('instruction');
+            if (instructionDiv) {
+                instructionDiv.innerHTML = `
+                    <!-- <p>🖐️ <b>张开手掌</b>：粒子扩散 / <b>握拳/捏合</b>：粒子聚拢</p> -->
+                    <p>☝️ <b>食指 (1)</b>: ${textConfig[1]} (蓝)</p>
+                    <p>✌️ <b>剪刀手 (2)</b>: ${textConfig[2]} (金)</p>
+                    <p>👌 <b>三指 (3)</b>: ${textConfig[3]} (红)</p>
+                    <p>👍 <b>四指 (4)</b>: ${textConfig[4]} (绿)</p>
+                    <!--<p style="margin-top: 10px; color: #ffcc00;">💡 <b>双击空格键</b>可编辑文字</p> -->
+                `;
+            }
+        }
+        
+        // --- [新增] 键盘事件处理 ---
+        function onKeyDown(event) {
+            if (event.code === 'Space') {
+                const currentTime = Date.now();
+                if (currentTime - lastSpaceTime < doubleClickDelay) {
+                    // 双击空格键
+                    event.preventDefault();
+                    openTextEditor();
+                    lastSpaceTime = 0; // 重置
+                } else {
+                    lastSpaceTime = currentTime;
+                }
+            }
+        }
+        
+        // --- [新增] 打开文字编辑器 ---
+        function openTextEditor() {
+            const message = `请输入新的文字配置（用逗号分隔）：\n\n当前配置：\n1指 = ${textConfig[1]}\n2指 = ${textConfig[2]}\n3指 = ${textConfig[3]}\n4指 = ${textConfig[4]}\n\n格式示例：你好,世界,新年,快乐`;
+            
+            const input = prompt(message, `${textConfig[1]},${textConfig[2]},${textConfig[3]},${textConfig[4]}`);
+            
+            if (input !== null && input.trim() !== '') {
+                const texts = input.split(',').map(t => t.trim());
+                if (texts.length >= 4) {
+                    textConfig[1] = texts[0] || textConfig[1];
+                    textConfig[2] = texts[1] || textConfig[2];
+                    textConfig[3] = texts[2] || textConfig[3];
+                    textConfig[4] = texts[3] || textConfig[4];
+                    
+                    // 更新当前显示的文字
+                    updateTextTarget(currentText);
+                    
+                    // 更新左下角说明文字
+                    updateInstructionText();
+                    
+                    alert('文字配置已更新！');
+                } else {
+                    alert('格式错误！请输入4个文字，用逗号分隔。');
+                }
+            }
+        }
+
+        // --- [新增] 获取不同文字的主题色 ---
+        function getColorTheme(text) {
+            switch(text) {
+                case "Hello World":
+                    // 科技蓝/紫
+                    return { hBase: 0.6, hVar: 0.2, s: 0.8, l: 0.6 }; 
+                case "2026":
+                    // 金色/橙色
+                    return { hBase: 0.08, hVar: 0.1, s: 0.9, l: 0.6 }; 
+                case "新年快乐":
+                    // 喜庆红/粉
+                    return { hBase: 0.95, hVar: 0.1, s: 0.9, l: 0.5 };
+                case "马到成功":
+                    // 成功绿
+                    return { hBase: 0.3, hVar: 0.1, s: 0.8, l: 0.6 };
+                default:
+                    return { hBase: 0.5, hVar: 0.5, s: 0.5, l: 0.5 };
+            }
+        }
+
+        // --- 核心功能：文字转粒子坐标 + [新增] 颜色分配 ---
+        function updateTextTarget(text) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 800; // 加大画布以支持更多文字
+            canvas.height = 300;
+
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            const fontSize = text.length > 5 ? 100 : 150;
+            ctx.font = `bold ${fontSize}px "Microsoft YaHei", sans-serif`;
+            ctx.fillStyle = '#FFFFFF';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+            
+            targetPositions = [];
+            // --- [新增] 获取当前文字的主题色配置
+            const theme = getColorTheme(text);
+
+            // 扫描像素
+            for (let y = 0; y < canvas.height; y += 2) {
+                for (let x = 0; x < canvas.width; x += 2) {
+                    const index = (y * canvas.width + x) * 4;
+                    if (data[index] > 128) { 
+                        targetPositions.push({
+                            x: (x - canvas.width / 2) * 0.6,
+                            y: -(y - canvas.height / 2) * 0.6,
+                            z: 0
+                        });
+                    }
+                }
+            }
+
+            // --- [新增] 更新所有粒子的目标颜色 ---
+            for (let i = 0; i < particleCount; i++) {
+                if (i < targetPositions.length) {
+                    // 属于文字的粒子，使用主题色，并加一点随机变化
+                    const hue = theme.hBase + (Math.random() - 0.5) * theme.hVar;
+                    baseColor.setHSL(hue, theme.s, theme.l);
+                    targetColors[i] = { r: baseColor.r, g: baseColor.g, b: baseColor.b };
+                } else {
+                    // 背景粒子，颜色暗淡一些
+                    const hue = theme.hBase + Math.random() * 0.5;
+                    baseColor.setHSL(hue, 0.3, 0.2);
+                    targetColors[i] = { r: baseColor.r, g: baseColor.g, b: baseColor.b };
+                }
+            }
+        }
+
+        // --- 动画循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // [修改 3/3] 必须调用 update 才能实现自动旋转和阻尼效果
+            if (controls) controls.update(); 
+
+            const positions = geometry.attributes.position.array;
+            // --- [新增] 获取颜色 buffer
+            const colors = geometry.attributes.color.array;
+            
+            const moveSpeed = 0.08; 
+            const colorSpeed = 0.03; // 颜色变化慢一点，看起来更柔和
+
+            for (let i = 0; i < particleCount; i++) {
+                let targetPos;
+                if (i < targetPositions.length) {
+                    targetPos = targetPositions[i];
+                } else {
+                    targetPos = randomPositions[i];
+                }
+
+                // --- 1. 位置更新 ---
+                let tx = targetPos.x;
+                let ty = targetPos.y;
+                let tz = targetPos.z;
+
+                // 手势扩散效果
+                if (dispersionFactor > 0.05) {
+                    const noiseScale = 300 * dispersionFactor;
+                    // 使用简单的三角函数模拟噪声，让散开更自然
+                    tx += Math.sin(i * 0.1 + Date.now()*0.001) * noiseScale;
+                    ty += Math.cos(i * 0.12 + Date.now()*0.001) * noiseScale;
+                    tz += Math.sin(i * 0.15 + Date.now()*0.001) * noiseScale;
+                }
+
+                currentPositions[i].x += (tx - currentPositions[i].x) * moveSpeed;
+                currentPositions[i].y += (ty - currentPositions[i].y) * moveSpeed;
+                currentPositions[i].z += (tz - currentPositions[i].z) * moveSpeed;
+
+                positions[i * 3] = currentPositions[i].x;
+                positions[i * 3 + 1] = currentPositions[i].y;
+                positions[i * 3 + 2] = currentPositions[i].z;
+
+                // --- [新增] 2. 颜色更新 (Lerp RGB) ---
+                const targetCol = targetColors[i];
+                currentColors[i].r += (targetCol.r - currentColors[i].r) * colorSpeed;
+                currentColors[i].g += (targetCol.g - currentColors[i].g) * colorSpeed;
+                currentColors[i].b += (targetCol.b - currentColors[i].b) * colorSpeed;
+
+                colors[i * 3] = currentColors[i].r;
+                colors[i * 3 + 1] = currentColors[i].g;
+                colors[i * 3 + 2] = currentColors[i].b;
+            }
+
+            geometry.attributes.position.needsUpdate = true;
+            // --- [新增] 通知 Three.js 更新颜色
+            geometry.attributes.color.needsUpdate = true;
+
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- MediaPipe 逻辑 (基本保持不变) ---
+        const videoElement = document.getElementById('video-element');
+
+        function onResults(results) {
+            document.getElementById('loading').style.display = 'none';
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                handDetected = true;
+                const landmarks = results.multiHandLandmarks[0];
+                const fingerCount = countFingers(landmarks);
+                const palmOpenness = calculatePalmOpenness(landmarks);
+                
+                // 调整了张合的敏感度
+                if (palmOpenness > 0.18) {
+                    dispersionFactor = THREE.MathUtils.lerp(dispersionFactor, (palmOpenness - 0.18) * 8, 0.1); 
+                } else {
+                    dispersionFactor = THREE.MathUtils.lerp(dispersionFactor, 0, 0.15);
+                }
+
+                // 切换文字
+                let nextText = currentText;
+                if (fingerCount === 1) nextText = textConfig[1];
+                else if (fingerCount === 2) nextText = textConfig[2];
+                else if (fingerCount === 3) nextText = textConfig[3];
+                else if (fingerCount === 4) nextText = textConfig[4];
+
+                // 只有当手势改变且手比较稳定（没有大幅度张开）时才切换，避免闪烁
+                if (nextText !== currentText && dispersionFactor < 0.5) {
+                    currentText = nextText;
+                    updateTextTarget(currentText);
+                }
+
+            } else {
+                handDetected = false;
+                dispersionFactor = THREE.MathUtils.lerp(dispersionFactor, 0, 0.05);
+            }
+        }
+
+        function countFingers(landmarks) {
+            let count = 0;
+            // 简化的判断：指尖 y < 指中关节 y
+            if (landmarks[8].y < landmarks[6].y) count++;
+            if (landmarks[12].y < landmarks[10].y) count++;
+            if (landmarks[16].y < landmarks[14].y) count++;
+            if (landmarks[20].y < landmarks[18].y) count++;
+            return count;
+        }
+
+        function calculatePalmOpenness(landmarks) {
+            // 拇指尖(4) 到 小指尖(20) 的距离
+            const dx = landmarks[4].x - landmarks[20].x;
+            const dy = landmarks[4].y - landmarks[20].y;
+            return Math.sqrt(dx*dx + dy*dy);
+        }
+
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+        
+        initThree();
+        animate();
+        cameraUtils.start();
+
+    </script>
+</body>
+</html>
