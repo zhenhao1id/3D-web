@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>Three.js + MediaPipe 手势粒子系统 (V2 - 修复版)</title>
+    <title> 手势粒子系统 </title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #000; }
         #canvas-container { width: 100vw; height: 100vh; }
@@ -234,16 +234,16 @@
         // --- [新增] 获取不同文字的主题色 ---
         function getColorTheme(text) {
             switch(text) {
-                case "Hello World":
+                case textConfig[1]:
                     // 科技蓝/紫
                     return { hBase: 0.6, hVar: 0.2, s: 0.8, l: 0.6 }; 
-                case "2026":
+                case textConfig[2]:
                     // 金色/橙色
                     return { hBase: 0.08, hVar: 0.1, s: 0.9, l: 0.6 }; 
-                case "新年快乐":
+                case textConfig[3]: 
                     // 喜庆红/粉
                     return { hBase: 0.95, hVar: 0.1, s: 0.9, l: 0.5 };
-                case "马到成功":
+                case textConfig[4]:
                     // 成功绿
                     return { hBase: 0.3, hVar: 0.1, s: 0.8, l: 0.6 };
                 default:
@@ -456,3 +456,4 @@
     </script>
 </body>
 </html>
+
